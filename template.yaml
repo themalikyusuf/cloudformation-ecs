@@ -1,3 +1,69 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Parameters:
+  DesiredCapacity:
+    Type: Number
+    Default: '1'
+    Description: Number of instances to launch in your ECS cluster.
+  MaxSize:
+    Type: Number
+    Default: '3'
+    Description: Maximum number of instances that can be launched in your ECS cluster.
+  ALBCertificateArn:
+    Type: String
+    Description: Amazon Resource Number(arn) of certificate to use.
+  MasterUsername:
+    Type: String
+    Default: 'MyUserName'
+    Description: RDS master username.
+  MasterUserPassword:
+    Type: String
+    Default: 'MyPassword'
+    Description: RDS master password.
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t2.micro
+    AllowedValues: [t2.micro, t2.small, t2.medium, t2.large, t2.xlarge, m3.medium]
+    ConstraintDescription: Please choose a valid instance type.
+  KeyName:
+    Description: EC2 instance key name
+    Type: String
+  DBInstanceClass:
+    Description: RDS instance class
+    Type: String
+    Default: db.t2.micro
+    AllowedValues: [db.t2.micro, db.t2.small, db.t2.medium, db.t2.large, db.t2.xlarge]
+    ConstraintDescription: Please choose a valid RDS instance class.
+  Environment:
+    Description: Environment type.
+    Type: String
+    Default: staging
+    AllowedValues: [development, staging, production]
+    ConstraintDescription: Please choose a valid environment type.
+
+Mappings:
+  AWSRegionToAMI:
+    us-east-1:
+      AMIID: ami-eca289fb
+    us-east-2:
+      AMIID: ami-446f3521
+    us-west-1:
+      AMIID: ami-9fadf8ff
+    us-west-2:
+      AMIID: ami-7abc111a
+
+  SubnetConfig:
+    VPC:
+      CIDR: '10.0.0.0/16'
+    PublicOne:
+      CIDR: '10.0.0.0/24'
+    PublicTwo:
+      CIDR: '10.0.1.0/24'
+    PrivateOne:
+      CIDR: '10.0.2.0/24'
+    PrivateTwo:
+      CIDR: '10.0.3.0/24'
+
 Resources:
 ### VPC NETWORKING RESOURCES ###
   VPC:
@@ -111,3 +177,343 @@ Resources:
         - !Ref PrivateSubnetOne
         - !Ref PrivateSubnetTwo
       DBSubnetGroupDescription: container db
+
+### ECS RESOURCES ###
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+
+  UIService:
+    Type: AWS::ECS::Service
+    DependsOn: Port80Listener
+    Properties:
+      Cluster: !Ref ECSCluster
+      Role: !Ref ECSServiceRole
+      DesiredCount: 1
+      TaskDefinition: !Ref UITaskDefinition
+      LoadBalancers:
+      - TargetGroupArn: !Ref UITargetGroup
+        ContainerPort: 80
+        ContainerName: 'httpd'
+
+  APIService:
+    Type: AWS::ECS::Service
+    DependsOn: Port80Listener
+    Properties:
+      Cluster: !Ref ECSCluster
+      Role: !Ref ECSServiceRole
+      DesiredCount: 1
+      TaskDefinition: !Ref APITaskDefinition
+      LoadBalancers:
+      - TargetGroupArn: !Ref APITargetGroup
+        ContainerPort: 80
+        ContainerName: 'httpd'
+
+  UITaskDefinition: 
+    Type: AWS::ECS::TaskDefinition
+    Properties: 
+      ContainerDefinitions: 
+      - Name: 'httpd'
+        Image: 'httpd'
+        Memory: 128
+        Essential: true
+        PortMappings: 
+        - ContainerPort: 80
+
+  APITaskDefinition: 
+    Type: AWS::ECS::TaskDefinition
+    Properties: 
+      ContainerDefinitions: 
+      - Name: 'httpd'
+        Image: 'httpd'
+        Memory: 128
+        Essential: true
+        PortMappings: 
+        - ContainerPort: 80
+
+  ECSALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Ref 'Environment'
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+      - Key: idle_timeout.timeout_seconds
+        Value: 30
+      Subnets:
+        - !Ref PublicSubnetOne
+        - !Ref PublicSubnetTwo
+      SecurityGroups: [!Ref 'EcsSecurityGroup']
+
+  Port80Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: redirect
+        RedirectConfig:
+          Host: "#{host}"
+          Path: "/#{path}"
+          Port: 443
+          Protocol: "HTTPS"
+          Query: "#{query}"
+          StatusCode: HTTP_301
+      LoadBalancerArn: !Ref 'ECSALB'
+      Port: 80
+      Protocol: HTTP
+
+  Port443Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !Ref 'UITargetGroup'
+      LoadBalancerArn: !Ref 'ECSALB'
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: 'ELBSecurityPolicy-2016-08'
+      Certificates:
+        - CertificateArn: !Ref 'ALBCertificateArn'
+
+  UIListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref 'UITargetGroup'
+      Conditions:
+      - Field: path-pattern
+        Values:
+        - 'acme/ui'
+      ListenerArn: !Ref 'Port80Listener'
+      Priority: 1
+
+  APIListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      Actions:
+      - Type: forward
+        TargetGroupArn: !Ref 'APITargetGroup'
+      Conditions:
+      - Field: path-pattern
+        Values:
+        - 'acme/api'
+      ListenerArn: !Ref 'Port80Listener'
+      Priority: 2
+
+  UITargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Join ['-', [ui, !Ref 'Environment']]
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      VpcId: !Ref 'VPC'
+
+  APITargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Join ['-', [api, !Ref 'Environment']]
+      Port: 80
+      Protocol: HTTP
+      TargetType: instance
+      VpcId: !Ref 'VPC'
+
+  ECSAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      VPCZoneIdentifier:
+        - !Ref PublicSubnetOne
+        - !Ref PublicSubnetTwo
+      LaunchConfigurationName: !Ref 'ContainerInstances'
+      MinSize: '1'
+      MaxSize: !Ref 'MaxSize'
+      DesiredCapacity: !Ref 'DesiredCapacity'
+
+  CloudwatchLogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Join ['-', [ECSLogGroup, !Ref 'AWS::StackName']]
+      RetentionInDays: 14
+
+# ECS Cluster Launch Config
+  ContainerInstances:
+    Type: AWS::AutoScaling::LaunchConfiguration
+    Properties:
+      ImageId: !FindInMap [AWSRegionToAMI, !Ref 'AWS::Region', AMIID]
+      SecurityGroups: [!Ref 'EcsSecurityGroup']
+      InstanceType: !Ref 'InstanceType'
+      BlockDeviceMappings: 
+        - DeviceName: '/dev/xvda'
+          Ebs: 
+            VolumeSize: 30
+            VolumeType: 'gp2'
+      IamInstanceProfile: !Ref 'EC2InstanceProfile'
+      KeyName: !Ref 'KeyName'
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          echo ECS_CLUSTER=${ECSCluster} >> /etc/ecs/ecs.config
+          yum install -y aws-cfn-bootstrap
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource ECSAutoScalingGroup --region ${AWS::Region}
+
+ # RDS PostreSql
+  RDS:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      VPCSecurityGroups:
+      - !Ref 'PrivateSecurityGroup'
+      AllocatedStorage: '5'
+      DBInstanceClass: !Ref 'DBInstanceClass'
+      Engine: 'postgres'
+      MasterUsername: !Ref 'MasterUsername'
+      MasterUserPassword: !Ref 'MasterUserPassword'
+      DBSubnetGroupName: !Ref DBSubnetGroup
+
+### SECURITY ###
+  EcsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS Security Group
+      VpcId: !Ref 'VPC'
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '22'
+        ToPort: '22'
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: '80'
+        ToPort: '80'
+        CidrIp: 0.0.0.0/0
+      - IpProtocol: tcp
+        FromPort: '443'
+        ToPort: '443'
+        CidrIp: 0.0.0.0/0
+
+  EcsSecurityGroupALBports:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref 'EcsSecurityGroup'
+      IpProtocol: tcp
+      FromPort: '31000'
+      ToPort: '61000'
+      SourceSecurityGroupId: !Ref 'EcsSecurityGroup'
+
+  PrivateSecurityGroup:    
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Private Security Group
+      VpcId:
+        Ref: VPC
+      SecurityGroupIngress:
+      - IpProtocol: tcp
+        FromPort: '5432'
+        ToPort: '5432'
+        SourceSecurityGroupId: !Ref 'EcsSecurityGroup'
+
+  # IAM Roles
+  ECSServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ecs.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+      - PolicyName: ecs-service
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+              - 'elasticloadbalancing:DeregisterInstancesFromLoadBalancer'
+              - 'elasticloadbalancing:DeregisterTargets'
+              - 'elasticloadbalancing:Describe*'
+              - 'elasticloadbalancing:RegisterInstancesWithLoadBalancer'
+              - 'elasticloadbalancing:RegisterTargets'
+              - 'ec2:Describe*'
+              - 'ec2:AuthorizeSecurityGroupIngress'
+            Resource: '*'
+
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [ec2.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+      - PolicyName: ecs-service
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+              - 'ecs:CreateCluster'
+              - 'ecs:DeregisterContainerInstance'
+              - 'ecs:DiscoverPollEndpoint'
+              - 'ecs:Poll'
+              - 'ecs:RegisterContainerInstance'
+              - 'ecs:StartTelemetrySession'
+              - 'ecs:Submit*'
+              - 'logs:CreateLogStream'
+              - 'logs:PutLogEvents'
+              - 'ecr:GetAuthorizationToken'
+              - 'ecr:BatchGetImage'
+              - 'ecr:GetDownloadUrlForLayer'
+            Resource: '*'
+
+  AutoscalingRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: [application-autoscaling.amazonaws.com]
+          Action: ['sts:AssumeRole']
+      Path: /
+      Policies:
+      - PolicyName: service-autoscaling
+        PolicyDocument:
+          Statement:
+          - Effect: Allow
+            Action:
+              - 'application-autoscaling:*'
+              - 'cloudwatch:DescribeAlarms'
+              - 'cloudwatch:PutMetricAlarm'
+              - 'ecs:DescribeServices'
+              - 'ecs:UpdateService'
+            Resource: '*'
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: /
+      Roles: [!Ref 'EC2Role']
+
+Outputs:
+  ClusterName:
+    Description: The name of the ECS cluster, used by the deploy script
+    Value: !Ref 'ECSCluster'
+    Export:
+      Name: !Join [':', [!Ref "AWS::StackName", "ClusterName" ]]
+  Url:
+    Description: The url at which the application is available
+    Value: !Join ['', [!GetAtt 'ECSALB.DNSName']]
+  ALBArn:
+    Description: The ARN of the ALB, exported for later use in creating services
+    Value: !Ref 'ECSALB'
+    Export:
+      Name: !Join [':', [!Ref "AWS::StackName", "ALBArn" ]]
+  ECSRole:
+    Description: The ARN of the ECS role, exports for later use in creating services
+    Value: !GetAtt 'ECSServiceRole.Arn'
+    Export:
+      Name: !Join [':', [!Ref "AWS::StackName", "ECSRole" ]]
+  VPCId:
+    Description: The ID of the VPC that this stack is deployed in
+    Value: !Ref 'VPC'
+    Export:
+      Name: !Join [':', [!Ref "AWS::StackName", "VPCId" ]]
