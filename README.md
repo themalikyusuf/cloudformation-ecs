@@ -1,9 +1,20 @@
-# cloudformation-ecs
-Cloudformation template for ECS infrastructure
+## cloudformation-ecs
+Cloudformation template(YAML) that creates the following AWS Resources
 
+##### VPC, Networking and Security Resources 
+- Public and private(for database) networks(subnets)
+- Security groups
 
-VPC netwworking resources 
-public and private(for database) networks(subnets)
+##### ECS Resources
+- ECS Cluster
+- Service 
+- Task definition 
+- Load balancer
+- Launch configuration 
+- IAM roles
 
+##### Database
+- RDS(PostgreSQL)
 
-ECS resources
+#### How to use
+Upload the template from the AWS [Cloudformation console](https://aws.amazon.com/cloudformation)
