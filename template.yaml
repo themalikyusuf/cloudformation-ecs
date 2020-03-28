@@ -129,7 +129,7 @@ Resources:
       SubnetId: !Ref PublicSubnetTwo
       RouteTableId: !Ref PublicRouteTable
 
-# DB/Internal Network
+# Database/Internal Network
   PrivateSubnetOne:
     Type: AWS::EC2::Subnet
     Properties:
